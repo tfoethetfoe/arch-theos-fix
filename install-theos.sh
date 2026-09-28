@@ -1,4 +1,4 @@
-```bash
+
 #!/usr/bin/env bash
 
 # Error codes + association:
@@ -664,4 +664,4 @@ fi
 
 special "Theos has been successfully installed!"
 common "Restart your shell and then run \$THEOS/bin/nic.pl to get started."
-```
+
