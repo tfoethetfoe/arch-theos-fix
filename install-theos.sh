@@ -1,7 +1,6 @@
-
 #!/usr/bin/env bash
 
-# Error codes + association:
+# Error codes:
 # 1 - Running as root
 # 2 - Unsupported platform
 # 3 - Dependency issue
@@ -12,11 +11,14 @@
 # 8 - SDK install failed
 # 9 - Checkra1n '/opt' setup failed
 # 10 - fakeroot adjustment failed
-# 11 - Enabling Linux binary compat on FreeBSD failed
 
-set -e
+# Don't run this as root.
+if [[ $EUID -eq 0 ]]; then
+	error "Theos should NOT be installed as root!"
+	error "Please run the installer as your normal user."
+	exit 1
+fi
 
-# Pretty print
 special() {
 	printf "\e[0;34m==> \e[1;34mTheos Installer:\e[m %s\n" "$1"
 }
@@ -33,58 +35,43 @@ error() {
 	printf "\e[0;31m==> \e[1;31m%s\e[m\n" "$1"
 }
 
-
-# Root is no bueno
-if [[ $EUID -eq 0 ]]; then
-	error "Theos should NOT be installed with or run as root (su/sudo)!"
-	error "  - Please re-run the installer as a non-root user."
-	exit 1
-fi
-
-
-# Common vars
-PLATFORM=$(uname)
-ARCH=$(uname -m)
+PLATFORM="$(uname)"
+ARCH="$(uname -m)"
 CSHELL="${SHELL##*/}"
 SHELL_ENV="unknown"
 
 if [[ $CSHELL == sh || $CSHELL == bash || $CSHELL == dash ]]; then
-	# Bash prioritizes bashrc > bash_profile > profile
-	if [[ -f $HOME/.bashrc ]]; then
+	if [[ -f "$HOME/.bashrc" ]]; then
 		SHELL_ENV="$HOME/.bashrc"
-	elif [[ -f $HOME/.bash_profile ]]; then
+	elif [[ -f "$HOME/.bash_profile" ]]; then
 		SHELL_ENV="$HOME/.bash_profile"
 	else
 		SHELL_ENV="$HOME/.profile"
 	fi
 elif [[ $CSHELL == zsh ]]; then
-	# Zsh prioritizes zshenv > zprofile > zshrc
 	zdot="${ZDOTDIR:-$HOME}"
 
-	if [[ -f $zdot/.zshenv ]]; then
+	if [[ -f "$zdot/.zshenv" ]]; then
 		SHELL_ENV="$zdot/.zshenv"
-	elif [[ -f $zdot/.zprofile ]]; then
+	elif [[ -f "$zdot/.zprofile" ]]; then
 		SHELL_ENV="$zdot/.zprofile"
 	else
 		SHELL_ENV="$zdot/.zshrc"
 	fi
 fi
 
-
-# The work
 theos_bool() {
-	local affirmative=(Y y YES yes TRUE true)
-
-	if [[ ${affirmative[*]} =~ $1 ]]; then
-		return 0
-	else
-		return 1
-	fi
+	case "${1,,}" in
+		y|yes|true)
+			return 0
+			;;
+		*)
+			return 1
+			;;
+	esac
 }
 
-
 set_theos() {
-	# Check for $THEOS env var
 	update "Checking for \$THEOS environment variable..."
 
 	if [[ -n $THEOS ]]; then
@@ -92,333 +79,202 @@ set_theos() {
 		return
 	fi
 
-	update "\$THEOS has not been set. Setting now..."
-
 	if [[ $SHELL_ENV == unknown ]]; then
-		error "Current shell ($CSHELL) is unsupported by this installer."
-		error "Please set the THEOS environment variable to '~/theos' manually before proceeding."
+		error "Your shell ($CSHELL) is not supported by this installer."
+		error "Please set THEOS manually to ~/theos."
 		exit 4
 	fi
 
-	# Set $THEOS
-	if [[ $PLATFORM == Darwin && ! -x $(command -v xcode-select) && -f /.bootstrapped ]]; then
-		echo "export THEOS=/opt/theos" >> "$SHELL_ENV"
-		export THEOS=/opt/theos
+	update "Setting \$THEOS..."
 
-		if [[ -d /opt ]]; then
-			update "'/opt' already exists. Checking its ownership..."
+	THEOS="$HOME/theos"
+	export THEOS
 
-			OWNER="$(stat -c '%U' /opt)"
-
-			if [[ $OWNER == root ]]; then
-				update "Owner of '/opt' is root. Attempting to switch owner to mobile..."
-
-				sudo chown mobile /opt \
-					&& update "Owner of '/opt' successfully transferred to mobile!" \
-					|| {
-						error "Failed to transfer ownership of '/opt' to mobile."
-						exit 9
-					}
-			else
-				update "Owner of '/opt' is not root. We should be good to go!"
-			fi
-		else
-			update "Creating a special directory to house Theos..."
-
-			sudo install -d -o mobile -g mobile /opt \
-				&& update "Special directory for Theos created successfully!" \
-				|| {
-					error "Special directory creation failed."
-					exit 9
-				}
-		fi
-	else
-		echo "export THEOS=~/theos" >> "$SHELL_ENV"
-		export THEOS=~/theos
+	if ! grep -q 'export THEOS=' "$SHELL_ENV" 2>/dev/null; then
+		echo 'export THEOS="$HOME/theos"' >> "$SHELL_ENV"
 	fi
-}
 
+	update "\$THEOS has been set to '$THEOS'."
+}
 
 get_theos() {
 	update "Checking for Theos install..."
 
-	if [[ -d $THEOS && $(ls -A "$THEOS") ]]; then
+	if [[ -d "$THEOS" ]] && [[ -n "$(ls -A "$THEOS" 2>/dev/null)" ]]; then
 		update "Theos appears to already be installed. Checking for updates..."
-		"$THEOS/bin/update-theos"
+
+		if [[ -x "$THEOS/bin/update-theos" ]]; then
+			"$THEOS/bin/update-theos" || true
+		fi
 	else
 		update "Theos does not appear to be installed. Cloning now..."
 
-		git clone --recursive https://github.com/theos/theos.git "$THEOS" \
-			&& update "Git clone of Theos was successful!" \
-			|| {
-				error "Theos git clone command failed."
-				exit 6
-			}
+		if git clone --recursive https://github.com/theos/theos.git "$THEOS"; then
+			update "Git clone of Theos was successful!"
+		else
+			error "Theos git clone command failed."
+			exit 6
+		fi
 	fi
 }
-
 
 get_sdks() {
 	update "Checking for patched SDKs..."
 
-	if [[ -d $THEOS/sdks/ && $(ls -A "$THEOS/sdks/" | grep sdk) ]]; then
+	if [[ -d "$THEOS/sdks" ]] &&
+		ls -A "$THEOS/sdks" 2>/dev/null | grep -q sdk; then
 		update "SDKs appear to already be installed."
 		return
 	fi
 
 	update "SDKs do not appear to be installed. Installing now..."
 
-	"$THEOS/bin/install-sdk" latest &&
-	"$THEOS/bin/install-sdk" latest-tv
+	if ! "$THEOS/bin/install-sdk" latest; then
+		error "Failed to install the latest SDK."
+		exit 8
+	fi
 
-	if [[ -n $(ls -A "$THEOS/sdks/" | grep sdk) ]]; then
+	if ! "$THEOS/bin/install-sdk" latest-tv; then
+		error "Failed to install the latest tvOS SDK."
+		exit 8
+	fi
+
+	if ls -A "$THEOS/sdks" 2>/dev/null | grep -q sdk; then
 		update "SDKs successfully installed!"
 	else
-		error "Something appears to have gone wrong while installing the SDKs."
+		error "Something went wrong while installing the SDKs."
 		exit 8
 	fi
 }
 
-
 darwin() {
-	# Check for Xcode
-	XCODE="$(xcode-select -p)"
+	XCODE="$(xcode-select -p 2>/dev/null || true)"
 
-	if [[ $XCODE == /Library/Developer/CommandLineTools && ! -d /Applications/Xcode.app/Contents/Developer/ ]]; then
-		error "Xcode, not just the Command Line Tools, is required for Theos to function properly."
-		common "Please install Xcode before continuing with the installation."
+	if [[ $XCODE == /Library/Developer/CommandLineTools ]] &&
+		[[ ! -d /Applications/Xcode.app/Contents/Developer ]]; then
+		error "Full Xcode is required for Theos."
+		error "The Command Line Tools alone aren't enough."
 		exit 3
-	elif [[ $XCODE == /Library/Developer/CommandLineTools && -d /Applications/Xcode.app/Contents/Developer/ ]]; then
-		common "Xcode developer directory is currently $XCODE."
-		common "Switching to /Applications/Xcode.app/Contents/Developer/..."
+	fi
+
+	if [[ $XCODE == /Library/Developer/CommandLineTools ]] &&
+		[[ -d /Applications/Xcode.app/Contents/Developer ]]; then
+		update "Switching to the full Xcode installation..."
 
 		sudo xcode-select -s /Applications/Xcode.app/Contents/Developer/
-	elif [[ $XCODE != *.app/Contents/Developer ]]; then
-		error "Xcode is required for Theos to function properly."
-		common "Check the output of 'xcode-select -p'."
-		exit 3
 	fi
 
-	# Dependencies
 	update "Preparing to install dependencies..."
 
-	if [[ -x $(command -v apt) && -f /opt/procursus/.procursus_strapped ]]; then
+	if command -v apt >/dev/null 2>&1 &&
+		[[ -f /opt/procursus/.procursus_strapped ]]; then
+
 		sudo apt update || true
 
-		sudo apt install -y ldid xz-utils \
-			&& update "Dependencies have been successfully installed!" \
-			|| {
-				error "Dependency installation failed."
-				exit 3
-			}
-
-	elif [[ -x $(command -v port) ]]; then
+		sudo apt install -y ldid xz-utils
+	elif command -v port >/dev/null 2>&1; then
 		sudo port selfupdate || true
-
-		yes | sudo port install ldid xz \
-			&& update "Dependencies have been successfully installed!" \
-			|| {
-				error "Dependency installation failed."
-				exit 3
-			}
-
-	elif [[ -x $(command -v brew) ]]; then
+		sudo port install ldid xz
+	elif command -v brew >/dev/null 2>&1; then
 		brew update || true
-
-		brew install ldid xz \
-			&& update "Dependencies have been successfully installed!" \
-			|| {
-				error "Dependency installation failed."
-				exit 3
-			}
-
+		brew install ldid xz
 	else
-		read -p "Homebrew is not installed. Would you like to have it installed? [y/n] " hbrew
+		read -r -p "Homebrew is not installed. Install it? [y/n] " hbrew
 
 		if theos_bool "$hbrew"; then
-			bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" \
-				&& update "Homebrew has been successfully installed!" \
-				|| {
-					error "Homebrew installation failed."
-					exit 3
-				}
-
+			/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 			brew install ldid xz
 		else
-			error "Homebrew provides tools Theos depends on."
-			error "Please install Homebrew before proceeding."
+			error "Homebrew is required."
 			exit 3
 		fi
 	fi
+
+	update "Dependencies have been successfully installed!"
 
 	set_theos
 	get_theos
 	get_sdks
 }
-
 
 darwin_mobile() {
-	LEGACY=0
-
-	KERNEL_VER=$(sysctl kern.osrelease | sed 's/[^0-9]*//g')
-
-	if [[ $KERNEL_VER < 1800 ]]; then
-		LEGACY=1
-	fi
-
-	if ! [[ -x $(command -v sudo) ]]; then
-		error "Please install 'sudo' before proceeding."
+	if ! command -v sudo >/dev/null 2>&1; then
+		error "Please install sudo before proceeding."
 		exit 3
 	fi
 
-	if ! [[ -x $(command -v head) ]]; then
-		error "Please install 'coreutils' before proceeding."
+	if ! command -v apt-get >/dev/null 2>&1; then
+		error "Please install apt before proceeding."
 		exit 3
 	fi
 
-	if ! [[ -x $(command -v xz) ]]; then
-		error "Please install 'xz-utils' before proceeding."
+	if ! command -v xz >/dev/null 2>&1; then
+		error "Please install xz before proceeding."
 		exit 3
 	fi
 
-	if ! [[ -x $(command -v apt-get) ]]; then
-		error "Please install 'apt' before proceeding."
-		exit 3
-	fi
+	update "Preparing to install dependencies..."
 
-	APTVER="$(apt-get --version | head -n1 | cut -d' ' -f2)"
+	sudo apt-get update || true
 
-	if dpkg --compare-versions "$APTVER" ge 1.1; then
-		uFLAGS=(--allow-insecure-repositories)
-		iFLAGS=(--allow-unauthenticated --allow-downgrades)
-	elif dpkg --compare-versions "$APTVER" ge 0.6.8; then
-		uFLAGS=()
-		iFLAGS=(--allow-unauthenticated)
+	if [[ -f /.procursus_strapped ]] ||
+		[[ -f /var/jb/.procursus_strapped ]]; then
+
+		sudo apt-get install -y \
+			ca-certificates \
+			clang \
+			coreutils \
+			curl \
+			git \
+			ldid \
+			make \
+			perl \
+			rsync \
+			xz
 	else
-		uFLAGS=()
-		iFLAGS=()
-	fi
-
-	update "Preparing to install dependencies. Please enter your password if prompted:"
-
-	if [[ $LEGACY -eq 1 ]]; then
-		read -p "Do you have the required jailbreak repositories installed? [y/n] " ready
-
-		if theos_bool "$ready"; then
-			sudo apt-get update "${uFLAGS[@]}" || true
-
-			sudo apt-get install -y "${iFLAGS[@]}" org.theos.dependencies \
-				&& update "Dependencies have been successfully installed!" \
-				|| {
-					error "Dependency installation failed."
-					exit 3
-				}
-		else
-			error "Please install the required repositories before proceeding."
-			exit 3
-		fi
-	else
-		if [[ -f /.procursus_strapped || -f /var/jb/.procursus_strapped ]]; then
-			read -p "Do you have 'https://apt.procurs.us' installed? [y/n] " ready
-
-			if theos_bool "$ready"; then
-				sudo apt update "${uFLAGS[@]}" || true
-
-				sudo apt install -y "${iFLAGS[@]}" theos-dependencies \
-					&& update "Dependencies have been successfully installed!" \
-					|| {
-						error "Dependency installation failed."
-						exit 3
-					}
-			else
-				error "Please install the required repository before proceeding."
-				exit 3
-			fi
-		else
-			read -p "Do you have 'https://apt.bingner.com' installed? [y/n] " ready
-
-			if theos_bool "$ready"; then
-				sudo apt update "${uFLAGS[@]}" || true
-
-				sudo apt install -y "${iFLAGS[@]}" \
-					ca-certificates clang coreutils curl dpkg git grep ldid make \
-					odcctools perl com.bingner.plutil rsync xz \
-					&& update "Dependencies have been successfully installed!" \
-					|| {
-						error "Dependency installation failed."
-						exit 3
-					}
-			else
-				error "Please install the required repository before proceeding."
-				exit 3
-			fi
-		fi
-
-		update "Checking desire for Swift support..."
-
-		read -p "Would you like to be able to work with Swift? [y/n] " confirm
-
-		if theos_bool "$confirm"; then
-			if [[ -f /.procursus_strapped || -f /var/jb/.procursus_strapped ]]; then
-				sudo apt install -y "${iFLAGS[@]}" swift
-			else
-				sudo apt install -y "${iFLAGS[@]}" com.kabiroberai.swift-toolchain
-			fi
-		else
-			update "Skipping Swift support."
-		fi
+		sudo apt-get install -y \
+			ca-certificates \
+			clang \
+			coreutils \
+			curl \
+			dpkg \
+			git \
+			grep \
+			ldid \
+			make \
+			perl \
+			rsync \
+			xz
 	fi
 
 	set_theos
 	get_theos
 	get_sdks
 }
-
 
 linux() {
 	local DISTRO="unknown"
 
-	if [[ -x $(command -v apt) ]]; then
-		DISTRO="debian"
-	elif [[ -x $(command -v pacman) ]]; then
+	if command -v pacman >/dev/null 2>&1; then
 		DISTRO="arch"
-	elif [[ -x $(command -v dnf) ]]; then
+	elif command -v apt >/dev/null 2>&1; then
+		DISTRO="debian"
+	elif command -v dnf >/dev/null 2>&1; then
 		DISTRO="redhat"
-	elif [[ -x $(command -v zypper) ]]; then
+	elif command -v zypper >/dev/null 2>&1; then
 		DISTRO="suse"
 	fi
 
 	update "Detected Linux distribution: $DISTRO"
 
-	# Check for sudo
-	if ! [[ -x $(command -v sudo) ]]; then
-		error "Please install 'sudo' before proceeding."
+	if ! command -v sudo >/dev/null 2>&1; then
+		error "Please install sudo before proceeding."
 		exit 3
 	fi
 
-	# Dependencies
 	update "Preparing to install dependencies. Please enter your password if prompted:"
 
 	case $DISTRO in
-		debian)
-			sudo apt update || true
-
-			sudo apt install -y \
-				build-essential \
-				fakeroot \
-				rsync \
-				curl \
-				perl \
-				zip \
-				git \
-				libxml2 \
-				&& update "Dependencies have been successfully installed!" \
-				|| {
-					error "Dependency installation failed."
-					exit 3
-				}
-			;;
-
 		arch)
 			sudo pacman -Syu --noconfirm || true
 
@@ -432,16 +288,25 @@ linux() {
 				perl \
 				zip \
 				git \
-				libxml2 \
-				&& update "Dependencies have been successfully installed!" \
-				|| {
-					error "Dependency installation failed."
-					exit 3
-				}
+				libxml2
+			;;
+
+		debian)
+			sudo apt update || true
+
+			sudo apt install -y \
+				build-essential \
+				fakeroot \
+				rsync \
+				curl \
+				perl \
+				zip \
+				git \
+				libxml2
 			;;
 
 		redhat)
-			sudo dnf group install -y "c-development" --refresh
+			sudo dnf group install -y "c-development" || true
 
 			sudo dnf install -y \
 				fakeroot \
@@ -452,17 +317,11 @@ linux() {
 				perl \
 				zip \
 				git \
-				libxml2 \
-				&& update "Dependencies have been successfully installed!" \
-				|| {
-					error "Dependency installation failed."
-					exit 3
-				}
+				libxml2
 			;;
 
 		suse)
 			sudo zypper refresh || true
-
 			sudo zypper install -y -t pattern devel_basis
 
 			sudo zypper install -y \
@@ -473,12 +332,7 @@ linux() {
 				perl \
 				zip \
 				git \
-				libxml2 \
-				&& update "Dependencies have been successfully installed!" \
-				|| {
-					error "Dependency installation failed."
-					exit 3
-				}
+				libxml2
 			;;
 
 		*)
@@ -487,94 +341,71 @@ linux() {
 			;;
 	esac
 
+	update "Dependencies have been successfully installed!"
 
-	# Arch/CachyOS uses its own fakeroot packaging.
-	# Do NOT use Debian's update-alternatives here.
+	# Arch doesn't have fakeroot-sysv or fakeroot-tcp.
+	# The fakeroot package already provides the command we need.
 	update "Checking fakeroot..."
 
 	if ! command -v fakeroot >/dev/null 2>&1; then
-		error "fakeroot was not found."
-		error "Install it with your package manager and try again."
+		error "fakeroot could not be found."
+		error "Try running: sudo pacman -S fakeroot"
 		exit 10
 	fi
 
-	FAKEROOT_PATH="$(command -v fakeroot)"
+	update "Using fakeroot at $(command -v fakeroot)."
 
-	if [[ $DISTRO == arch ]]; then
-		update "Using Arch/CachyOS fakeroot at $FAKEROOT_PATH."
-	else
-		# Debian traditionally provides fakeroot-sysv through alternatives.
-		# Only attempt it when the executable actually exists.
-		if [[ -x /usr/bin/fakeroot-sysv && -x $(command -v update-alternatives) ]]; then
-			sudo update-alternatives --set fakeroot /usr/bin/fakeroot-sysv \
-				&& update "fakeroot adjusted!" \
-				|| update "Could not adjust fakeroot; continuing with the installed version."
-		else
-			update "No compatible fakeroot alternative found; using $FAKEROOT_PATH."
-		fi
-	fi
-
-
-	# Check for WSL
 	update "Checking for WSL..."
 
 	local rel
 	rel="$(uname -r)"
 
-	if [[ ${rel,,} =~ microsoft ]]; then
-		if [[ $rel =~ WSL2 ]]; then
+	if [[ ${rel,,} == *microsoft* ]]; then
+		if [[ ${rel,,} == *wsl2* ]]; then
 			update "WSL2 detected. Nothing to do here."
 		else
 			update "WSL1 detected."
 
 			if [[ $DISTRO == arch ]]; then
-				update "Using the native Arch/CachyOS fakeroot configuration."
-			elif [[ -x /usr/bin/fakeroot-tcp && -x $(command -v update-alternatives) ]]; then
-				sudo update-alternatives --set fakeroot /usr/bin/fakeroot-tcp \
-					&& update "fakeroot adjusted for WSL1!" \
-					|| update "Could not adjust fakeroot for WSL1; continuing."
+				update "Using the native Arch fakeroot setup."
+			elif command -v update-alternatives >/dev/null 2>&1 &&
+				[[ -x /usr/bin/fakeroot-tcp ]]; then
+				sudo update-alternatives --set fakeroot /usr/bin/fakeroot-tcp || true
 			else
-				update "No WSL1-specific fakeroot alternative is available."
+				update "No WSL1 fakeroot alternative was found."
 			fi
 		fi
 	else
 		update "Seems you're not using WSL. Moving on..."
 	fi
 
-
 	set_theos
 	get_theos
 
-
-	# Get a toolchain
 	update "Checking for iOS toolchain..."
 
-	if [[ -d $THEOS/toolchain/linux/iphone/ && $(ls -A "$THEOS/toolchain/linux/iphone") ]]; then
+	if [[ -d "$THEOS/toolchain/linux/iphone" ]] &&
+		[[ -x "$THEOS/toolchain/linux/iphone/bin/clang" ]]; then
 		update "A toolchain appears to already be installed."
 	else
 		update "A toolchain does not appear to be installed."
 
-		stoolchain="n"
+		local stoolchain="n"
 
 		if [[ -z $CI ]]; then
-			read -p "Would you like your toolchain to support Swift (larger toolchain size) or not (smaller toolchain size)? [y/n] " stoolchain
+			read -r -p \
+				"Would you like Swift support? [y/n] " \
+				stoolchain
 		fi
 
 		if theos_bool "$stoolchain"; then
 			case $DISTRO in
-				debian)
-					sudo apt install -y libtinfo6
-					;;
-
 				arch)
 					sudo pacman -S --needed --noconfirm ncurses
+					;;
 
-					# Toolchain looks for a specific libncurses.
-					LATEST_LIBCURSES="$(ls -v /usr/lib/ | grep 'libncurses.*so' | tail -n1)"
-
-					if [[ -n $LATEST_LIBCURSES ]]; then
-						sudo ln -sf "/usr/lib/$LATEST_LIBCURSES" /usr/lib/libncurses.so.6
-					fi
+				debian)
+					sudo apt install -y libtinfo6
 					;;
 
 				redhat)
@@ -582,33 +413,35 @@ linux() {
 					;;
 
 				suse)
-					common "Unfortunately, we do not currently provide a SUSE-compatible Swift toolchain."
+					common "Swift toolchain support is not available for SUSE."
 					get_sdks
 					return
 					;;
 			esac
 
+			mkdir -p "$THEOS/toolchain"
+
 			if [[ $ARCH == x86_64 ]]; then
-				curl -sL \
+				curl -fL \
 					https://github.com/kabiroberai/swift-toolchain-linux/releases/download/v2.3.0/swift-5.8-ubuntu20.04.tar.xz \
-					| tar -xJvf - -C "$THEOS/toolchain/"
+					| tar -xJf - -C "$THEOS/toolchain"
 			elif [[ $ARCH == aarch64 ]]; then
-				curl -sL \
+				curl -fL \
 					"https://github.com/kabiroberai/swift-toolchain-linux/releases/download/v2.3.0/swift-5.8-ubuntu20.04-$ARCH.tar.xz" \
-					| tar -xJvf - -C "$THEOS/toolchain/"
+					| tar -xJf - -C "$THEOS/toolchain"
 			else
-				common "Apologies, we do not currently provide precompiled toolchains for $ARCH Linux."
+				common "There is no Swift toolchain available for $ARCH."
 				get_sdks
 				return
 			fi
 		else
 			case $DISTRO in
-				debian)
-					sudo apt install -y libtinfo6
-					;;
-
 				arch)
 					sudo pacman -S --needed --noconfirm ncurses
+					;;
+
+				debian)
+					sudo apt install -y libtinfo6
 					;;
 
 				redhat)
@@ -620,37 +453,35 @@ linux() {
 					;;
 			esac
 
-			if [[ $ARCH == aarch64 || $ARCH == x86_64 ]]; then
-				curl -sL \
-					"https://github.com/L1ghtmann/llvm-project/releases/latest/download/iOSToolchain-$ARCH.tar.xz" \
-					| tar -xJvf - -C "$THEOS/toolchain/"
-			else
-				common "Apologies, we do not currently provide precompiled toolchains for $ARCH Linux."
+			if [[ $ARCH != x86_64 && $ARCH != aarch64 ]]; then
+				common "There is no precompiled toolchain available for $ARCH."
 				get_sdks
 				return
 			fi
+
+			mkdir -p "$THEOS/toolchain"
+
+			curl -fL \
+				"https://github.com/L1ghtmann/llvm-project/releases/latest/download/iOSToolchain-$ARCH.tar.xz" \
+				| tar -xJf - -C "$THEOS/toolchain"
 		fi
 
-		# Confirm that toolchain is usable
-		if [[ -x $THEOS/toolchain/linux/iphone/bin/clang ]]; then
+		if [[ -x "$THEOS/toolchain/linux/iphone/bin/clang" ]]; then
 			update "Successfully installed the toolchain!"
 		else
-			error "Something appears to have gone wrong -- the toolchain is not accessible."
+			error "The toolchain was downloaded, but clang could not be found."
 			exit 7
 		fi
 	fi
 
-
 	get_sdks
 }
 
-
-# Determine platform and start work
 special "Starting install..."
 common "Platform: $PLATFORM"
 
 if [[ $PLATFORM == Darwin ]]; then
-	if [[ -x $(command -v xcode-select) ]]; then
+	if command -v xcode-select >/dev/null 2>&1; then
 		darwin
 	else
 		darwin_mobile
@@ -658,10 +489,9 @@ if [[ $PLATFORM == Darwin ]]; then
 elif [[ ${PLATFORM,,} == linux ]]; then
 	linux
 else
-	error "'$PLATFORM' is currently unsupported by this installer and/or Theos."
+	error "'$PLATFORM' is currently unsupported by this installer."
 	exit 2
 fi
 
 special "Theos has been successfully installed!"
 common "Restart your shell and then run \$THEOS/bin/nic.pl to get started."
-
